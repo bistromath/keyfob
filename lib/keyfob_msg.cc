@@ -57,7 +57,7 @@ keyfob_msg::keyfob_msg (gr_msg_queue_sptr queue, double rate, double threshold)
     d_bitrate_min = 2200;
     d_bitrate_max = 2600;
     d_bitrate = 2400;
-    d_bitrate_step = 10; //FIXME: this will change
+    d_bitrate_step = 20; //FIXME: this will change
     d_samples_per_bit = d_rate / d_bitrate;
     
     set_history(d_samples_per_bit * 150); //128-bit packets
@@ -106,10 +106,10 @@ float keyfob_msg::get_energy_diff(const float *data, float samples_per_bit) {
     return onesum-zerosum;
 }
 
-int keyfob_msg::get_clock_rate_dir(const float *data, float samples_per_bit) {
-    float currdiff = get_energy_diff(data, samples_per_bit);
-    float nextdiff = get_energy_diff(data, d_rate / (d_bitrate + d_bitrate_step));
-    float prevdiff = get_energy_diff(data, d_rate / (d_bitrate - d_bitrate_step));
+int keyfob_msg::get_clock_rate_dir(const float *data, float bitrate) {
+    float currdiff = get_energy_diff(data, d_rate / bitrate);
+    float nextdiff = get_energy_diff(data, d_rate / (bitrate + d_bitrate_step));
+    float prevdiff = get_energy_diff(data, d_rate / (bitrate - d_bitrate_step));
     //printf("Currdiff: %f nextdiff: %f prevdiff: %f\n", currdiff, nextdiff, prevdiff);
     if(prevdiff > currdiff) return -1;
     else if (nextdiff > currdiff) return 1;
@@ -177,21 +177,23 @@ keyfob_msg::work (int noutput_items,
         //we can calculate the reference level in parallel with this
         //FIXME: use a search method that looks for a peak instead of searching the whole space
         
-        float diff_max = 0;
-        
         //here we search starting at the peak and moving away
         int clock_rate_dir = 1;
+        float temp_bitrate=d_bitrate, temp_spb=d_samples_per_bit;
         while(clock_rate_dir != 0) {
-            if(d_bitrate > d_bitrate_max) break;
-            if(d_bitrate < d_bitrate_min) break;
-            clock_rate_dir = get_clock_rate_dir(in+i, d_samples_per_bit);
+            if(temp_bitrate > d_bitrate_max) continue;
+            if(temp_bitrate < d_bitrate_min) continue;
+            clock_rate_dir = get_clock_rate_dir(in+i, temp_bitrate);
+            if(clock_rate_dir == 0) break;
             //printf("clock_rate_dir: %i\n", clock_rate_dir);
-            d_bitrate += clock_rate_dir * d_bitrate_step;
-            d_samples_per_bit = d_rate / d_bitrate;
-            //printf("trying new rate: %f\n", d_bitrate);
+            temp_bitrate += clock_rate_dir * d_bitrate_step;
+            temp_spb = d_rate / temp_bitrate;
+            printf("trying new rate: %f\n", temp_bitrate);
         }
         
-        //printf("Clock rate: %f\n", d_bitrate);
+        
+        //printf("Clock rate: %f\n", temp_bitrate);
+        //printf("Starting clock rate: %f\n", d_bitrate);
         //printf("Reference: %f\n", ref);
         
         ref = in[i] / 2.0; //FIXME TEMP
@@ -200,11 +202,11 @@ keyfob_msg::work (int noutput_items,
         //sometimes this thing sends incomplete packets or just complete junk
         bool its_on = true;
         for(j=0;j<36;j++) {
-            if(in[i+int(d_samples_per_bit * (13 + 3*j))] > ref) {
+            if(in[i+int(temp_spb * (13 + 3*j))] > ref) {
                 its_on = false;
                 break;
             }
-            if(in[i+int(d_samples_per_bit * (15 + 3*j))] < ref) {
+            if(in[i+int(temp_spb * (15 + 3*j))] < ref) {
                 its_on = false;
                 break;
             }
@@ -214,7 +216,10 @@ keyfob_msg::work (int noutput_items,
             continue;
         }
         
-        //now we've got a clock rate in d_samples_per_chip and a reference level in ref
+        d_bitrate = temp_bitrate;
+        d_samples_per_bit = temp_spb;
+        
+        //now we've got a clock rate in d_samples_per_bit and a reference level in ref
         
         
         //now we can slice and output raw bits! we'll say there are 20 addr bits and 16 data bits, because they're (sort of) duplicated
