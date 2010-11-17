@@ -9,14 +9,11 @@ from gnuradio import eng_notation
 from gnuradio import gr
 from gnuradio import uhd
 from gnuradio.eng_option import eng_option
-from gnuradio.gr import firdes
-from gnuradio.wxgui import scopesink2
-from grc_gnuradio import wxgui as grc_wxgui
 from optparse import OptionParser
-import wx
 import keyfob
 import time
 import gnuradio.gr.gr_threading as _threading
+import virtkey
 
 class top_block_runner(_threading.Thread):
     def __init__(self, tb):
@@ -32,7 +29,7 @@ class top_block_runner(_threading.Thread):
 
 class top_block(gr.top_block):#(grc_wxgui.top_block_gui):
 
-	def __init__(self, queue):
+	def __init__(self, queue, options, args):
 		#grc_wxgui.top_block_gui.__init__(self, title="Top Block")
 		gr.top_block.__init__(self)
 		##################################################
@@ -43,12 +40,11 @@ class top_block(gr.top_block):#(grc_wxgui.top_block_gui):
 		##################################################
 		# Blocks
 		##################################################
-		self.const_source_x_0 = gr.sig_source_f(0, gr.GR_CONST_WAVE, 0, 0, 0.2)
 		self.gr_complex_to_mag_squared_0 = gr.complex_to_mag_squared(1)
 		self.gr_keep_one_in_n_0 = gr.keep_one_in_n(gr.sizeof_gr_complex*1, 10)
-		self.keyfob_msg = keyfob.msg(queue, samp_rate/10.0, 200e-9)
+		self.keyfob_msg = keyfob.msg(queue, samp_rate/10.0, options.threshold)
 		self.uhd_single_usrp_source_0 = uhd.single_usrp_source(
-			device_addr="addr=192.168.10.2",
+			device_addr="",
 			io_type=uhd.io_type_t.COMPLEX_FLOAT32,
 			num_channels=1,
 		)
@@ -56,9 +52,9 @@ class top_block(gr.top_block):#(grc_wxgui.top_block_gui):
 		_clk_cfg.ref_source = uhd.clock_config_t.REF_SMA
 		_clk_cfg.pps_source = uhd.clock_config_t.PPS_SMA
 		_clk_cfg.pps_polarity = uhd.clock_config_t.PPS_POS
-		self.uhd_single_usrp_source_0.set_clock_config(_clk_cfg);
+		#self.uhd_single_usrp_source_0.set_clock_config(_clk_cfg);
 		self.uhd_single_usrp_source_0.set_samp_rate(samp_rate)
-		self.uhd_single_usrp_source_0.set_center_freq(418e6, 0)
+		self.uhd_single_usrp_source_0.set_center_freq(options.freq, 0)
 		self.uhd_single_usrp_source_0.set_gain(40, 0)
 
 		##################################################
@@ -71,25 +67,59 @@ class top_block(gr.top_block):#(grc_wxgui.top_block_gui):
 	def set_samp_rate(self, samp_rate):
 		self.samp_rate = samp_rate
 		self.uhd_single_usrp_source_0.set_samp_rate(self.samp_rate)
+		
+class kb_input():
+	_kb = virtkey.virtkey()
+	keycodes = [ 0xff51, 0xff56, 0xff53, 0xff55, 0xff0d ]
+	#up: switch 3, ord(0x49) PgUp
+	#down: sw 1, ord(0x51) PgDn
+	#left: sw 0, ord(0x4B) L arrow
+	#right: sw 2, ord(0x4D) R arrow
+	#button: sw 4, ord(0x39) enter
+
+	def press(self, mask):
+		for i in range(0,5):
+			if (mask & ( 1 << i )):
+				print "Key %i" % i
+				self._kb.press_keysym(self.keycodes[i])
+				self._kb.release_keysym(self.keycodes[i])
+			
 
 if __name__ == '__main__':
 	parser = OptionParser(option_class=eng_option, usage="%prog: [options]")
+	parser.add_option("-f", "--freq", type="eng_float", default=418e6, help="set receive frequency in Hz [default=%default]", metavar="FREQ")
+	parser.add_option("-t", "--threshold", type="eng_float", default=200e-9, help="set minimum signal threshold [default=%default]", metavar="dB")
+	parser.add_option("-a", "--address", type="int", default=0, help="receive packets to this address [default=%default]")
 	(options, args) = parser.parse_args()
 	queue = gr.msg_queue()
-	tb = top_block(queue)
+	tb = top_block(queue, options, args)
 	runner = top_block_runner(tb)
+	kb = kb_input() #our keyboard input hijacker
+	kb_history = list()
 	
 	while 1:
 		try:
 			if queue.empty_p() == 0:
 				while queue.empty_p() == 0:
-					msg = queue.delete_head()
-					print msg.to_string()
+					msg = queue.delete_head().to_string()
+
+					[ref, addr, sw] = msg.split()
+					#print "Ref: %f Addr: %i Sw: %i" % (float(ref), int(addr), int(sw))
+					
+					if int(addr) == options.address:
+						if kb_history.count(int(sw)) > 0:
+							kb.press(int(sw))
+							kb_history.remove(int(sw))
+						else:
+							kb_history.append(int(sw))
+				
 			elif runner.done:
 				raise KeyboardInterrupt
 				break
 			else:
-				time.sleep(0.1)
+				time.sleep(0.2)
+				
+			kb_history = list()
 		
 		except KeyboardInterrupt:
 			tb.stop()
