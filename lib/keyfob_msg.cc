@@ -54,11 +54,11 @@ keyfob_msg::keyfob_msg (gr_msg_queue_sptr queue, double rate, double threshold)
     d_rate(rate),
     d_threshold(threshold)
 {
-    d_bitrate_min = 2300;
-    d_bitrate_max = 2500;
+    d_bitrate_min = 2200;
+    d_bitrate_max = 2600;
     d_bitrate = 2400;
-    d_bitrate_step = 20; //FIXME: this will change
-    d_samples_per_bit = d_rate / d_bitrate_min;
+    d_bitrate_step = 10; //FIXME: this will change
+    d_samples_per_bit = d_rate / d_bitrate;
     
     set_history(d_samples_per_bit * 150); //128-bit packets
 }
@@ -94,6 +94,26 @@ static int early_late(const float *data, int samples_per_chip) {
 	if(gate_sum_early > gate_sum_now) return -1;
 	else if(gate_sum_late > gate_sum_now) return 1;
 	else return 0;
+}
+
+float keyfob_msg::get_energy_diff(const float *data, float samples_per_bit) {
+    float zerosum=0, onesum=0;
+    for(int i = 0; i < 36; i++) {
+        zerosum += bit_energy(data + (0 + int(samples_per_bit * (13 + 3*i))), samples_per_bit);
+        onesum  += bit_energy(data + (0 + int(samples_per_bit * (15 + 3*i))), samples_per_bit);
+    }
+    
+    return onesum-zerosum;
+}
+
+int keyfob_msg::get_clock_rate_dir(const float *data, float samples_per_bit) {
+    float currdiff = get_energy_diff(data, samples_per_bit);
+    float nextdiff = get_energy_diff(data, d_rate / (d_bitrate + d_bitrate_step));
+    float prevdiff = get_energy_diff(data, d_rate / (d_bitrate - d_bitrate_step));
+    //printf("Currdiff: %f nextdiff: %f prevdiff: %f\n", currdiff, nextdiff, prevdiff);
+    if(prevdiff > currdiff) return -1;
+    else if (nextdiff > currdiff) return 1;
+    else return 0;
 }
 
 int 
@@ -158,22 +178,21 @@ keyfob_msg::work (int noutput_items,
         //FIXME: use a search method that looks for a peak instead of searching the whole space
         
         float diff_max = 0;
-        for(k = d_bitrate_min; k < d_bitrate_max; k += d_bitrate_step) {
-            float my_samples_per_chip = d_rate / k;
-            zerosum = onesum = 0;
-            for(j=0; j<36; j++) {
-                //zerosum += in[i + int(my_samples_per_chip * (13 + 3*j))]; //FIXME: use bit_energy here if we've got the CPU
-                //onesum  += in[i + int(my_samples_per_chip * (15 + 3*j))];
-                zerosum += bit_energy(in + (i + int(my_samples_per_chip * (13 + 3*j))), my_samples_per_chip);
-                onesum  += bit_energy(in + (i + int(my_samples_per_chip * (15 + 3*j))), my_samples_per_chip);
-            }
-            float diff = onesum - zerosum;
-            if(diff > diff_max) {
-                ref = onesum / 72.0;
-                diff_max = diff;
-                d_samples_per_bit = my_samples_per_chip;
-            }
+        
+        //here we search starting at the peak and moving away
+        int clock_rate_dir = 1;
+        while(clock_rate_dir != 0) {
+            if(d_bitrate > d_bitrate_max) break;
+            if(d_bitrate < d_bitrate_min) break;
+            clock_rate_dir = get_clock_rate_dir(in+i, d_samples_per_bit);
+            //printf("clock_rate_dir: %i\n", clock_rate_dir);
+            d_bitrate += clock_rate_dir * d_bitrate_step;
+            d_samples_per_bit = d_rate / d_bitrate;
+            //printf("trying new rate: %f\n", d_bitrate);
         }
+        
+        //printf("Clock rate: %f\n", d_bitrate);
+        //printf("Reference: %f\n", ref);
         
         ref = in[i] / 2.0; //FIXME TEMP
 
@@ -196,8 +215,7 @@ keyfob_msg::work (int noutput_items,
         }
         
         //now we've got a clock rate in d_samples_per_chip and a reference level in ref
-        //printf("Clock rate: %f\n", d_rate / d_samples_per_bit);
-        //printf("Reference: %f\n", ref);
+        
         
         //now we can slice and output raw bits! we'll say there are 20 addr bits and 16 data bits, because they're (sort of) duplicated
         int addr_bits = 0;

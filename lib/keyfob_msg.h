@@ -72,7 +72,8 @@ private:
   double d_bitrate;
   double d_bitrate_step;
   double d_samples_per_bit;
-  
+  float get_energy_diff(const float *data, float samples_per_bit);
+  int get_clock_rate_dir(const float *data, float samples_per_bit);
 
  public:
   ~keyfob_msg ();	// public destructor

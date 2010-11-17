@@ -80,7 +80,6 @@ class kb_input():
 	def press(self, mask):
 		for i in range(0,5):
 			if (mask & ( 1 << i )):
-				print "Key %i" % i
 				self._kb.press_keysym(self.keycodes[i])
 				self._kb.release_keysym(self.keycodes[i])
 			
@@ -90,6 +89,7 @@ if __name__ == '__main__':
 	parser.add_option("-f", "--freq", type="eng_float", default=418e6, help="set receive frequency in Hz [default=%default]", metavar="FREQ")
 	parser.add_option("-t", "--threshold", type="eng_float", default=200e-9, help="set minimum signal threshold [default=%default]", metavar="dB")
 	parser.add_option("-a", "--address", type="int", default=0, help="receive packets to this address [default=%default]")
+	parser.add_option("-v", "--verbose", action="store_true", default=False, help="verbose output")
 	(options, args) = parser.parse_args()
 	queue = gr.msg_queue()
 	tb = top_block(queue, options, args)
@@ -104,7 +104,7 @@ if __name__ == '__main__':
 					msg = queue.delete_head().to_string()
 
 					[ref, addr, sw] = msg.split()
-					#print "Ref: %f Addr: %i Sw: %i" % (float(ref), int(addr), int(sw))
+					if options.verbose: print "Ref: %f Addr: %i Sw: %i" % (float(ref), int(addr), int(sw))
 					
 					if int(addr) == options.address:
 						if kb_history.count(int(sw)) > 0:
