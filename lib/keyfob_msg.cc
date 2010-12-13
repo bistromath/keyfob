@@ -59,6 +59,7 @@ keyfob_msg::keyfob_msg (gr_msg_queue_sptr queue, double rate, double threshold)
     d_bitrate = 2400;
     d_bitrate_step = 20; //FIXME: this will change
     d_samples_per_bit = d_rate / d_bitrate;
+    d_search_full_space = true;
     
     set_history(d_samples_per_bit * 150); //128-bit packets
 }
@@ -122,17 +123,15 @@ keyfob_msg::work (int noutput_items,
 			       gr_vector_void_star &output_items)
 {
   const float *in = (const float *) input_items[0];
-  //ok, really? the bit rate is insanely variable. and clock recovery is hard and expensive. we can do data-aided clock
-  //recovery without too much effort. we can spec a minimum and maximum data rate and know that every 6-chip symbol is
+  
+  //so this keyfob is simple enough that after channel selection and AM demod, we can do
+  //preamble detection, clock recovery, and slicing all in this block. this keeps things fast.
+  
+  //clock recovery: we can spec a minimum and maximum data rate and know that every 6-chip symbol is
   //"011011" or "001011" or "001001"
-  //every 3-bit chip is "011" or "001"
   //every third bit is 0,x,1 <- there's your clock recovery
   //so go through the whole packet and sample the first and third bits
   //and maximize the difference over the allowable clock range
-  //then pick out your bits from the packet
-  //i guess you can start at the center
-  //ok so we set a threshold above which the preamble has to sit; this can be coded into a constructor parameter or just hardcoded
-  //the preamble detector can use the center rate to look for preambles, it's short enough it shouldn't drift out of window for 6 bits
   
   int i,j,k;
   int switches[8], address[10];
@@ -166,37 +165,55 @@ keyfob_msg::work (int noutput_items,
         
         //first, the bit center; we'll use the 0th bit as our guinea pig
         //for simplicity we'll assume that we're currently before the bit center (see line 126)
+        //a better approach would use all the samples of the preamble to determine bit center.
         while(early_late(in+(i++), d_samples_per_bit) > 0);
         //now we're at the bit center.
         
         //to find out what clock rate we're at, we start at the minimum possible clock rate and
         //calculate the sum of the bit energy at all the expected "1" bits, and at the expected "0" bits.
         //the difference forms a metric which indicates how close we are to the correct clock rate.
-        //to save CPU we're just going to use the center bits instead of the bit energy.
-        //this is really cheesy and throws away data but saves lots of CPU
         //we can calculate the reference level in parallel with this
-        //FIXME: use a search method that looks for a peak instead of searching the whole space
         
-        //here we search starting at the peak and moving away
-        int clock_rate_dir = 1;
-        float temp_bitrate=d_bitrate, temp_spb=d_samples_per_bit;
-        while(clock_rate_dir != 0) {
-            if(temp_bitrate > d_bitrate_max) continue;
-            if(temp_bitrate < d_bitrate_min) continue;
-            clock_rate_dir = get_clock_rate_dir(in+i, temp_bitrate);
-            if(clock_rate_dir == 0) break;
-            //printf("clock_rate_dir: %i\n", clock_rate_dir);
-            temp_bitrate += clock_rate_dir * d_bitrate_step;
+        //this approach assumes the difference function is monotonic w.r.t. bit rate error.
+        //one problem is that this metric is NOT monotonic far away from the peak.
+        //if you make the assumption that the user will be operating with only one transmitter,
+        //one solution is to do a full search ONCE on startup, and after finding a valid packet
+        //use the peak-finding method henceforth.
+        
+        double temp_bitrate=d_bitrate, temp_spb=d_samples_per_bit;
+        if(d_search_full_space) { //here we search for the max signal level across all possible clock rates
+            double max_diff_bitrate = d_bitrate_min;
+            double max_diff_level = 0;
+            for(temp_bitrate=d_bitrate_min; temp_bitrate<=d_bitrate_max; temp_bitrate+=d_bitrate_step) {
+		//printf("Trying rate %f\n", temp_bitrate);
+                double this_diff = get_energy_diff(in+i, d_rate / temp_bitrate);
+                if(this_diff > max_diff_level) {
+                    max_diff_level = this_diff;
+                    max_diff_bitrate = temp_bitrate;
+                }
+            }
+            temp_bitrate = max_diff_bitrate;
             temp_spb = d_rate / temp_bitrate;
-            printf("trying new rate: %f\n", temp_bitrate);
+            printf("full search rate: %f\n", temp_bitrate);
+            
+        } else { //here we search starting at the peak and moving away
+            int clock_rate_dir = 1;
+            while(clock_rate_dir != 0) {
+                if(temp_bitrate > d_bitrate_max) { d_search_full_space = true; continue; } //search might have run away
+                if(temp_bitrate < d_bitrate_min) { d_search_full_space = true; continue; } //so we'll try harder next time
+                clock_rate_dir = get_clock_rate_dir(in+i, temp_bitrate);
+                if(clock_rate_dir == 0) break;
+                temp_bitrate += clock_rate_dir * d_bitrate_step;
+                temp_spb = d_rate / temp_bitrate;
+                printf("trying new rate: %f\n", temp_bitrate);
+            }
         }
-        
         
         //printf("Clock rate: %f\n", temp_bitrate);
         //printf("Starting clock rate: %f\n", d_bitrate);
         //printf("Reference: %f\n", ref);
         
-        ref = in[i] / 2.0; //FIXME TEMP
+        ref = in[i] / 2.0; //FIXME THIS IS TACKY
 
         //now let's validate that all the "one" bits are one and all the "zero" bits are zero
         //sometimes this thing sends incomplete packets or just complete junk
@@ -216,13 +233,12 @@ keyfob_msg::work (int noutput_items,
             continue;
         }
         
-        d_bitrate = temp_bitrate;
+        d_search_full_space = false; //we've found a valid packet since init
+        d_bitrate = temp_bitrate; //we do this here so that it doesn't correct the default bitrate for junk packets
         d_samples_per_bit = temp_spb;
         
         //now we've got a clock rate in d_samples_per_bit and a reference level in ref
-        
-        
-        //now we can slice and output raw bits! we'll say there are 20 addr bits and 16 data bits, because they're (sort of) duplicated
+        //we can slice and output bits now. there are 20 addr bits and 16 data bits, because they're (sort of) duplicated
         int addr_bits = 0;
         for(j=0; j<10; j++) {
             address[j] = ((in[i + int(d_samples_per_bit * (14 + 6*j + 0))] > ref) << 1) | 
@@ -236,8 +252,8 @@ keyfob_msg::work (int noutput_items,
                           ((in[i + int(d_samples_per_bit * (74 + 6*j + 3))] > ref) << 0);
             switch_bits += (switches[j] == 1) ? 0 : (1 << j);
         }
+
         //now we can post a message
-        //printf("Addr: 0x%x Switches: 0x%x\n", addr_bits, switch_bits);
         std::ostringstream payload;
         payload << ref << " " << addr_bits << " " << switch_bits;
         gr_message_sptr msg = gr_make_message_from_string(std::string(payload.str()));
@@ -248,8 +264,6 @@ keyfob_msg::work (int noutput_items,
     }
 
   }
-
-
 
   // Tell runtime system how many items we consumed.
   return i;

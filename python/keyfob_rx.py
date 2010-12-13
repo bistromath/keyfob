@@ -71,10 +71,10 @@ class top_block(gr.top_block):#(grc_wxgui.top_block_gui):
 class kb_input():
 	_kb = virtkey.virtkey()
 	keycodes = [ 0xff51, 0xff56, 0xff53, 0xff55, 0xff0d ]
-	#up: switch 3, ord(0x49) PgUp
-	#down: sw 1, ord(0x51) PgDn
 	#left: sw 0, ord(0x4B) L arrow
+	#down: sw 1, ord(0x51) PgDn
 	#right: sw 2, ord(0x4D) R arrow
+	#up: switch 3, ord(0x49) PgUp
 	#button: sw 4, ord(0x39) enter
 
 	def press(self, mask):
@@ -97,6 +97,9 @@ if __name__ == '__main__':
 	kb = kb_input() #our keyboard input hijacker
 	kb_history = list()
 	
+	timeout_reset = 5
+	timeout_count = 0
+	
 	while 1:
 		try:
 			if queue.empty_p() == 0:
@@ -106,18 +109,22 @@ if __name__ == '__main__':
 					[ref, addr, sw] = msg.split()
 					if options.verbose: print "Ref: %f Addr: %i Sw: %i" % (float(ref), int(addr), int(sw))
 					
-					if int(addr) == options.address:
+					if int(addr) == options.address and timeout_count == 0:
 						if kb_history.count(int(sw)) > 0:
 							kb.press(int(sw))
 							kb_history.remove(int(sw))
+							timeout_count = timeout_reset #don't listen for a while
 						else:
 							kb_history.append(int(sw))
+						
 				
 			elif runner.done:
 				raise KeyboardInterrupt
 				break
 			else:
 				time.sleep(0.2)
+				if timeout_count > 0:
+					timeout_count -= 1
 				
 			kb_history = list()
 		
